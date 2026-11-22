@@ -97,7 +97,7 @@ function CreateForm({ onCreated, onClose }: { onCreated: () => void; onClose: ()
         </div>
       </div>
       <div>
-        <label className="label">User time (RFC3339 — the offset sets the schedule's timezone)</label>
+        <label className="label">User time (RFC3339 — the offset sets the schedule&apos;s timezone)</label>
         <input
           className="input font-mono"
           value={userTime}
