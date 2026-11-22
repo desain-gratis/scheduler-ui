@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import StatusBadge from '@/components/StatusBadge';
 import { useScheduler } from '@/context/SchedulerContext';
 import { getDailyCount, getHourlyCount } from '@/lib/api';
@@ -16,6 +16,8 @@ function sum(c: StatusCounts): number {
 
 export default function CalendarPage() {
   const { cfg, timezone, ready } = useScheduler();
+  // On phones the day detail sits below the calendar; scroll to it when a day is picked.
+  const detailRef = useRef<HTMLElement>(null);
 
   const [month, setMonth] = useState(() => {
     const d = new Date();
@@ -120,13 +122,13 @@ export default function CalendarPage() {
     setMonth((m) => new Date(m.getFullYear(), m.getMonth() + delta, 1));
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-      <section className="card p-4">
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-6">
+      <section className="card p-2 sm:p-4">
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <button className="btn" onClick={() => shiftMonth(-1)}>
             ←
           </button>
-          <h1 className="min-w-[9rem] text-center text-lg font-semibold">
+          <h1 className="min-w-0 flex-1 text-center text-lg font-semibold sm:min-w-[9rem] sm:flex-none">
             {month.toLocaleString(undefined, { month: 'long', year: 'numeric' })}
           </h1>
           <button className="btn" onClick={() => shiftMonth(1)}>
@@ -143,9 +145,9 @@ export default function CalendarPage() {
             Today
           </button>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
             <select
-              className="input w-52"
+              className="input min-w-0 flex-1 sm:w-52 sm:flex-none"
               value={queueFilter}
               onChange={(e) => setQueueFilter(e.target.value)}
             >
@@ -186,8 +188,13 @@ export default function CalendarPage() {
             return (
               <button
                 key={key}
-                onClick={() => setSelectedDay(key)}
-                className={`flex min-h-[5.5rem] flex-col items-stretch gap-1 bg-white p-1.5 text-left transition hover:bg-indigo-50 ${
+                onClick={() => {
+                  setSelectedDay(key);
+                  if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                    detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }
+                }}
+                className={`flex min-h-[3.75rem] flex-col items-stretch gap-1 bg-white p-1 text-left transition hover:bg-indigo-50 sm:min-h-[5.5rem] sm:p-1.5 ${
                   inMonth ? '' : 'bg-slate-50 text-slate-400'
                 } ${selected ? 'ring-2 ring-inset ring-indigo-500' : ''}`}
               >
@@ -201,9 +208,19 @@ export default function CalendarPage() {
                   >
                     {d.getDate()}
                   </span>
-                  {total > 0 && <span className="text-[10px] text-slate-400">{total}</span>}
+                  {total > 0 && (
+                    <span className="text-[10px] font-medium text-slate-500 sm:font-normal sm:text-slate-400">
+                      {total}
+                    </span>
+                  )}
                 </div>
-                <div className="flex flex-col gap-0.5">
+                {/* Phones: just coloured dots per status; the count is in the corner */}
+                <div className="flex flex-wrap gap-0.5 sm:hidden">
+                  {ALL_EXECUTION_STATUSES.filter((s) => counts[s]).map((s) => (
+                    <span key={s} className={`h-2 w-2 rounded-full ${STATUS_STYLES[s].dot}`} />
+                  ))}
+                </div>
+                <div className="hidden flex-col gap-0.5 sm:flex">
                   {ALL_EXECUTION_STATUSES.filter((s) => counts[s]).map((s) => (
                     <div key={s} className="flex items-center gap-1 text-[11px] leading-tight">
                       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_STYLES[s].dot}`} />
@@ -228,7 +245,7 @@ export default function CalendarPage() {
         </div>
       </section>
 
-      <aside className="card h-fit p-4">
+      <aside ref={detailRef} className="card h-fit scroll-mt-28 p-3 sm:p-4 lg:scroll-mt-4">
         <div className="mb-1 flex items-baseline justify-between">
           <h2 className="text-base font-semibold">{selectedDay}</h2>
           <span className="text-xs text-slate-500">{timezone}</span>

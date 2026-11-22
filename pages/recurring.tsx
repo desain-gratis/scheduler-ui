@@ -76,14 +76,14 @@ function CreateForm({ onCreated, onClose }: { onCreated: () => void; onClose: ()
       </div>
       <div>
         <label className="label">Cron</label>
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             className="input font-mono"
             value={cron}
             onChange={(e) => setCron(e.target.value)}
           />
           <select
-            className="input w-48"
+            className="input sm:w-48"
             value=""
             onChange={(e) => e.target.value && setCron(e.target.value)}
           >
@@ -155,18 +155,18 @@ export default function RecurringPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-end gap-3">
+      <div className="flex flex-wrap items-end gap-3">
         <div>
           <h1 className="text-xl font-semibold">Recurring tasks</h1>
           <p className="text-xs text-slate-500">
             Cron definitions in namespace <code className="font-mono">{cfg.namespace}</code>
           </p>
         </div>
-        <div className="ml-auto flex gap-2">
-          <button className="btn" onClick={load} disabled={loading}>
+        <div className="flex w-full gap-2 sm:ml-auto sm:w-auto">
+          <button className="btn flex-1 sm:flex-none" onClick={load} disabled={loading}>
             {loading ? 'Loading…' : 'Refresh'}
           </button>
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
+          <button className="btn btn-primary flex-1 sm:flex-none" onClick={() => setCreating(true)}>
             + New recurring task
           </button>
         </div>
@@ -178,7 +178,48 @@ export default function RecurringPage() {
         </div>
       )}
 
-      <div className="card overflow-x-auto">
+      {/* Phones: one card per recurring task */}
+      <div className="space-y-2 md:hidden">
+        {tasks.map((t) => (
+          <div key={t.id} className="card p-3">
+            <div className="break-all font-mono text-sm font-medium">{t.queue_id}</div>
+            <div className="mt-0.5 break-all font-mono text-[10px] text-slate-400">{t.id}</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">{t.cron}</code>
+              <span className="text-[10px] text-slate-400">tz offset {t.user_time.slice(-6)}</span>
+            </div>
+            <pre className="mt-2 overflow-x-auto font-mono text-xs text-slate-600">
+              {JSON.stringify(t.input)}
+            </pre>
+            <div className="mt-2 text-xs text-slate-500">
+              {t.state ? (
+                <>
+                  Generated until {fmtDateTime(t.state.last_generate_end, timezone)} ·{' '}
+                  {t.state.generate_index} instances
+                </>
+              ) : (
+                'Not generated yet'
+              )}
+            </div>
+            <Link
+              className="btn mt-3 w-full"
+              href={`/executions?queue_id=${encodeURIComponent(
+                t.queue_id,
+              )}&recurring_task_id=${encodeURIComponent(t.id)}`}
+            >
+              Executions →
+            </Link>
+          </div>
+        ))}
+        {tasks.length === 0 && (
+          <div className="card px-3 py-10 text-center text-sm text-slate-500">
+            {loading ? 'Loading…' : 'No recurring tasks in this namespace.'}
+          </div>
+        )}
+      </div>
+
+      {/* Tablet / desktop: table */}
+      <div className="card hidden overflow-x-auto md:block">
         <table className="min-w-full divide-y divide-slate-200">
           <thead className="bg-slate-50">
             <tr>
