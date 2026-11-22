@@ -5,11 +5,16 @@
 html,
 body {
   @apply bg-slate-50 text-slate-900;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  overflow-x: hidden;
 }
 
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm sm:py-1.5 font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary {
     @apply border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700;
@@ -18,7 +23,8 @@ body {
     @apply border-red-300 bg-white text-red-700 hover:bg-red-50;
   }
   .input {
-    @apply w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500;
+    /* text-base on phones: iOS Safari zooms the page when focusing inputs under 16px */
+    @apply w-full rounded-md border border-slate-300 bg-white px-2.5 py-2 text-base shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:py-1.5 sm:text-sm;
   }
   .label {
     @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500;

@@ -148,8 +148,8 @@ export default function ExecutionsPage() {
             {filtered.length} of {tasks.length} shown
           </p>
         </div>
-        <div className="ml-auto flex flex-wrap items-end gap-3">
-          <div className="w-52">
+        <div className="grid w-full grid-cols-2 gap-3 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap sm:items-end">
+          <div className="col-span-2 sm:w-52">
             <label className="label">Queue ID</label>
             <input
               className="input font-mono"
@@ -159,7 +159,7 @@ export default function ExecutionsPage() {
               onKeyDown={(e) => e.key === 'Enter' && load()}
             />
           </div>
-          <div className="w-40">
+          <div className="sm:w-40">
             <label className="label">Day ({timezone})</label>
             <input
               type="date"
@@ -171,7 +171,7 @@ export default function ExecutionsPage() {
               }}
             />
           </div>
-          <div className="w-56">
+          <div className="col-span-2 sm:w-56">
             <label className="label">Search</label>
             <input
               className="input"
@@ -183,7 +183,7 @@ export default function ExecutionsPage() {
               }}
             />
           </div>
-          <div className="w-48">
+          <div className="sm:w-48">
             <label className="label">Sort</label>
             <select
               className="input"
@@ -218,14 +218,15 @@ export default function ExecutionsPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
+      {/* Single scrollable row on phones, wrapping chips on larger screens */}
+      <div className="-mx-3 flex items-center gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
         {ALL_EXECUTION_STATUSES.map((s) => {
           const on = statuses.includes(s);
           return (
             <button
               key={s}
               onClick={() => toggleStatus(s)}
-              className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+              className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium transition sm:px-2.5 sm:py-1 ${
                 on
                   ? 'border-indigo-600 bg-indigo-600 text-white'
                   : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
@@ -237,7 +238,7 @@ export default function ExecutionsPage() {
         })}
         {(statuses.length > 0 || day) && (
           <button
-            className="text-xs text-slate-500 underline"
+            className="shrink-0 whitespace-nowrap text-xs text-slate-500 underline"
             onClick={() => {
               setStatuses([]);
               setDay('');
@@ -254,7 +255,45 @@ export default function ExecutionsPage() {
         </div>
       )}
 
-      <div className="card overflow-x-auto">
+      {/* Phones: one tappable card per execution */}
+      <div className="space-y-2 md:hidden">
+        {visible.map((t) => (
+          <button
+            key={`${t.queue_id}/${t.id}`}
+            type="button"
+            onClick={() => setSelected(t)}
+            className="card block w-full p-3 text-left active:bg-slate-50"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="font-mono text-sm font-medium">
+                {fmtDateTime(t.scheduled_run_at, timezone)}
+              </div>
+              <StatusBadge status={t.status} />
+            </div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-600">{t.queue_id}</div>
+            <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-slate-500">
+              <span>{t.execution_mode}</span>
+              <span>
+                {t.assignment_status}
+                {t.assignment_state && ` → node ${t.assignment_state.assigned_to}`}
+              </span>
+            </div>
+            {t.execution_state && (
+              <div className="mt-1 truncate font-mono text-xs text-slate-600">
+                {prettyJson(t.execution_state.output)}
+              </div>
+            )}
+          </button>
+        ))}
+        {visible.length === 0 && (
+          <div className="card px-3 py-10 text-center text-sm text-slate-500">
+            {loading ? 'Loading…' : 'No executions match the current filters.'}
+          </div>
+        )}
+      </div>
+
+      {/* Tablet / desktop: table */}
+      <div className="card hidden overflow-x-auto md:block">
         <table className="min-w-full divide-y divide-slate-200">
           <thead className="bg-slate-50">
             <tr>
@@ -331,7 +370,7 @@ export default function ExecutionsPage() {
               <code className="break-all font-mono text-xs text-slate-600">{selected.id}</code>
               {CANCELLABLE.includes(selected.status) && (
                 <button
-                  className="btn btn-danger ml-auto"
+                  className="btn btn-danger w-full sm:ml-auto sm:w-auto"
                   disabled={cancelling === selected.id}
                   onClick={() => cancel(selected)}
                 >
@@ -339,7 +378,7 @@ export default function ExecutionsPage() {
                 </button>
               )}
             </div>
-            <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1.5 text-sm">
+            <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm sm:grid-cols-[9rem_minmax(0,1fr)]">
               <dt className="text-slate-500">Queue</dt>
               <dd className="font-mono">{selected.queue_id}</dd>
               <dt className="text-slate-500">Scheduled run</dt>
