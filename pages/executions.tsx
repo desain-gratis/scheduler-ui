@@ -10,6 +10,34 @@ import { ALL_EXECUTION_STATUSES, ExecutionStatus, TaskExecution } from '@/types/
 const CANCELLABLE: ExecutionStatus[] = ['PENDING'];
 const PAGE_SIZE = 50;
 
+type SortMode = 'upcoming' | 'asc' | 'desc';
+
+const SORT_OPTIONS: { value: SortMode; label: string }[] = [
+  { value: 'upcoming', label: 'Upcoming first' },
+  { value: 'asc', label: 'Time ↑ (oldest first)' },
+  { value: 'desc', label: 'Time ↓ (newest first)' },
+];
+
+function runTime(t: TaskExecution): number {
+  const ms = new Date(t.scheduled_run_at).getTime();
+  return isNaN(ms) ? 0 : ms;
+}
+
+/**
+ * - upcoming: tasks scheduled from now on, nearest first, followed by past tasks, most recent first
+ * - asc / desc: plain scheduled time order
+ */
+function sortTasks(list: TaskExecution[], mode: SortMode): TaskExecution[] {
+  const out = [...list];
+  if (mode === 'asc') return out.sort((a, b) => runTime(a) - runTime(b));
+  if (mode === 'desc') return out.sort((a, b) => runTime(b) - runTime(a));
+
+  const now = Date.now();
+  const upcoming = out.filter((t) => runTime(t) >= now).sort((a, b) => runTime(a) - runTime(b));
+  const past = out.filter((t) => runTime(t) < now).sort((a, b) => runTime(b) - runTime(a));
+  return [...upcoming, ...past];
+}
+
 export default function ExecutionsPage() {
   const router = useRouter();
   const { cfg, timezone, ready } = useScheduler();
@@ -19,6 +47,7 @@ export default function ExecutionsPage() {
   const [day, setDay] = useState('');
   const [statuses, setStatuses] = useState<ExecutionStatus[]>([]);
   const [search, setSearch] = useState('');
+  const [sortMode, setSortMode] = useState<SortMode>('upcoming');
   const [tasks, setTasks] = useState<TaskExecution[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +69,6 @@ export default function ExecutionsPage() {
     setError(null);
     try {
       const data = await listTaskExecutions(cfg, { queue_id: queueId || undefined });
-      data.sort((a, b) => b.scheduled_run_at.localeCompare(a.scheduled_run_at));
       setTasks(data);
       setPage(0);
     } catch (e) {
@@ -81,8 +109,10 @@ export default function ExecutionsPage() {
     });
   }, [tasks, statuses, recurringId, day, search, timezone]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const visible = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const sorted = useMemo(() => sortTasks(filtered, sortMode), [filtered, sortMode]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const visible = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   const statusCounts = useMemo(() => {
     const m: Partial<Record<ExecutionStatus, number>> = {};
@@ -152,6 +182,23 @@ export default function ExecutionsPage() {
                 setPage(0);
               }}
             />
+          </div>
+          <div className="w-48">
+            <label className="label">Sort</label>
+            <select
+              className="input"
+              value={sortMode}
+              onChange={(e) => {
+                setSortMode(e.target.value as SortMode);
+                setPage(0);
+              }}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
           </div>
           <button className="btn" onClick={() => setDay(ymd(new Date()))}>
             Today
