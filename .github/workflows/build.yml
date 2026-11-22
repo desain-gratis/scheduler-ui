@@ -1,0 +1,41 @@
+name: Node.js Split Build and Upload
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_call:
+
+jobs:
+  # JOB 1: Handles compilation and generates build files
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # `npm ci` needs a committed package-lock.json; fall back to `npm install` until one exists.
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run build
+        run: npm run build --if-present
+
+      # Temporary share folder with the next job
+      - name: Upload temporary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: ./out
+          retention-days: 1 # Deletes automatically after 1 day to save storage
