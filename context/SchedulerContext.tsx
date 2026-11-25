@@ -56,18 +56,22 @@ export function SchedulerProvider({ children }: { children: React.ReactNode }) {
   const setNamespace = useCallback((v: string) => setNamespaceState(v.trim()), []);
   const setTimezone = useCallback((v: string) => setTimezoneState(v.trim() || 'UTC'), []);
 
+  // Stable identity: only changes with the API URL / namespace, so data fetchers that depend on it
+  // are not restarted when e.g. the display timezone changes.
+  const cfg = useMemo(() => ({ baseUrl, namespace }), [baseUrl, namespace]);
+
   const value = useMemo<SchedulerContextValue>(
     () => ({
       baseUrl,
       namespace,
       timezone,
       ready,
-      cfg: { baseUrl, namespace },
+      cfg,
       setBaseUrl,
       setNamespace,
       setTimezone,
     }),
-    [baseUrl, namespace, timezone, ready, setBaseUrl, setNamespace, setTimezone],
+    [baseUrl, namespace, timezone, ready, cfg, setBaseUrl, setNamespace, setTimezone],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -30,6 +30,9 @@ export default function Modal({ title, onClose, children, wide }: Props) {
         className={`card flex max-h-[92vh] w-full flex-col rounded-b-none sm:max-h-none sm:rounded-b-lg ${
           wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'
         }`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3">
