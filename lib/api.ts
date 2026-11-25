@@ -13,12 +13,35 @@ export interface ApiConfig {
   namespace: string;
 }
 
+export interface RequestOptions {
+  /** Abort the request, e.g. when URL params changed and the response would be stale. */
+  signal?: AbortSignal;
+}
+
+/**
+ * status 0  => the request never got a response (offline, CORS, DNS, server down)
+ * otherwise => HTTP status returned by the server
+ */
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
     super(message);
     this.status = status;
   }
+}
+
+export function isAbortError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
+}
+
+/** Human readable, safe to show to the user. */
+export function describeError(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 0) return e.message;
+    if (e.status >= 500) return `Server error (${e.status}): ${e.message}`;
+    return `Request failed (${e.status}): ${e.message}`;
+  }
+  return e instanceof Error ? e.message : String(e);
 }
 
 function joinUrl(base: string, path: string): string {
@@ -40,14 +63,23 @@ async function request<T>(
   }
   const url = joinUrl(cfg.baseUrl, path) + (qs.toString() ? `?${qs.toString()}` : '');
 
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'X-Namespace': cfg.namespace,
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        'X-Namespace': cfg.namespace,
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init?.headers || {}),
+      },
+    });
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    throw new ApiError(
+      0,
+      `Could not reach the server at ${cfg.baseUrl}. Check your connection, the API URL, and that the server allows requests from this site (CORS).`,
+    );
+  }
 
   const text = await res.text();
   if (!res.ok) {
@@ -58,9 +90,14 @@ async function request<T>(
     } catch {
       /* plain-text error from server */
     }
-    throw new ApiError(res.status, msg || res.statusText);
+    throw new ApiError(res.status, msg || res.statusText || 'No details provided');
   }
-  return (text ? JSON.parse(text) : null) as T;
+
+  try {
+    return (text ? JSON.parse(text) : null) as T;
+  } catch {
+    throw new ApiError(res.status, 'The server sent a response that could not be read.');
+  }
 }
 
 /** Server wraps successful list responses as { success: [...] }. */
@@ -82,8 +119,11 @@ function aggregationQuery(p: AggregationParams) {
   };
 }
 
-export async function listRecurringTasks(cfg: ApiConfig): Promise<RecurringTask[]> {
-  return unwrap(await request(cfg, '/task/recurring'));
+export async function listRecurringTasks(
+  cfg: ApiConfig,
+  opts: RequestOptions = {},
+): Promise<RecurringTask[]> {
+  return unwrap(await request(cfg, '/task/recurring', { signal: opts.signal }));
 }
 
 export async function createRecurringTask(
@@ -96,8 +136,11 @@ export async function createRecurringTask(
 export async function listTaskExecutions(
   cfg: ApiConfig,
   filter: { queue_id?: string } = {},
+  opts: RequestOptions = {},
 ): Promise<TaskExecution[]> {
-  return unwrap(await request(cfg, '/task', { query: { queue_id: filter.queue_id } }));
+  return unwrap(
+    await request(cfg, '/task', { query: { queue_id: filter.queue_id }, signal: opts.signal }),
+  );
 }
 
 export async function cancelTaskExecution(cfg: ApiConfig, task: TaskExecution): Promise<unknown> {
@@ -107,10 +150,22 @@ export async function cancelTaskExecution(cfg: ApiConfig, task: TaskExecution): 
   });
 }
 
-export async function getDailyCount(cfg: ApiConfig, p: AggregationParams): Promise<DailyCount[]> {
-  return unwrap(await request(cfg, '/task/daily', { query: aggregationQuery(p) }));
+export async function getDailyCount(
+  cfg: ApiConfig,
+  p: AggregationParams,
+  opts: RequestOptions = {},
+): Promise<DailyCount[]> {
+  return unwrap(
+    await request(cfg, '/task/daily', { query: aggregationQuery(p), signal: opts.signal }),
+  );
 }
 
-export async function getHourlyCount(cfg: ApiConfig, p: AggregationParams): Promise<HourlyCount[]> {
-  return unwrap(await request(cfg, '/task/hourly', { query: aggregationQuery(p) }));
+export async function getHourlyCount(
+  cfg: ApiConfig,
+  p: AggregationParams,
+  opts: RequestOptions = {},
+): Promise<HourlyCount[]> {
+  return unwrap(
+    await request(cfg, '/task/hourly', { query: aggregationQuery(p), signal: opts.signal }),
+  );
 }

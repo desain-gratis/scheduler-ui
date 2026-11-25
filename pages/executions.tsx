@@ -1,118 +1,129 @@
-import { useRouter } from 'next/router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AutoSizer, List } from 'react-virtualized';
+import type { ListRowProps } from 'react-virtualized';
 import Modal from '@/components/Modal';
+import { EmptyPanel, ErrorPanel, InlineError, Skeleton } from '@/components/StatePanels';
 import StatusBadge from '@/components/StatusBadge';
+import { useToast } from '@/components/Toast';
 import { useScheduler } from '@/context/SchedulerContext';
-import { cancelTaskExecution, listTaskExecutions } from '@/lib/api';
+import { cancelTaskExecution, describeError, listTaskExecutions } from '@/lib/api';
 import { fmtDateTime, prettyJson, ymd } from '@/lib/format';
+import { isValidYmd } from '@/lib/params';
+import { useAsyncData } from '@/lib/useAsyncData';
+import { useMediaQuery } from '@/lib/useMediaQuery';
+import { useUrlState } from '@/lib/useUrlState';
 import { ALL_EXECUTION_STATUSES, ExecutionStatus, TaskExecution } from '@/types/scheduler';
 
+/**
+ * URL params (all optional) — the page is fully described by its URL:
+ *   queue_id, recurring_task_id, day (YYYY-MM-DD), status (repeatable), q (search),
+ *   selected (execution id => detail dialog)
+ *
+ * The list is sorted by scheduled time, ascending, and virtualized (react-virtualized) so that
+ * thousands of executions stay smooth. When it opens (and whenever the filters change) it is
+ * positioned at the current time.
+ */
+
 const CANCELLABLE: ExecutionStatus[] = ['PENDING'];
-const PAGE_SIZE = 50;
+const EMPTY_TASKS: TaskExecution[] = [];
 
-type SortMode = 'upcoming' | 'asc' | 'desc';
-
-const SORT_OPTIONS: { value: SortMode; label: string }[] = [
-  { value: 'upcoming', label: 'Upcoming first' },
-  { value: 'asc', label: 'Time ↑ (oldest first)' },
-  { value: 'desc', label: 'Time ↓ (newest first)' },
-];
+// Row geometry (px). Rows have a fixed height, which is what lets the list virtualize cheaply
+// and keeps the layout from shifting while data loads.
+const CARD_ROW_HEIGHT = 116; // phones: 108px card + 8px gap
+const TABLE_ROW_HEIGHT = 52; // md and up
+const SKELETON_ROWS = 8;
+// Same breakpoint as Tailwind's `md:`.
+const DESKTOP_QUERY = '(min-width: 768px)';
+const TABLE_GRID =
+  'grid grid-cols-[10.5rem_minmax(7rem,1fr)_8.5rem_8rem_minmax(5rem,1fr)_5.5rem] items-center gap-x-3';
 
 function runTime(t: TaskExecution): number {
   const ms = new Date(t.scheduled_run_at).getTime();
   return isNaN(ms) ? 0 : ms;
 }
 
-/**
- * - upcoming: tasks scheduled from now on, nearest first, followed by past tasks, most recent first
- * - asc / desc: plain scheduled time order
- */
-function sortTasks(list: TaskExecution[], mode: SortMode): TaskExecution[] {
-  const out = [...list];
-  if (mode === 'asc') return out.sort((a, b) => runTime(a) - runTime(b));
-  if (mode === 'desc') return out.sort((a, b) => runTime(b) - runTime(a));
-
-  const now = Date.now();
-  const upcoming = out.filter((t) => runTime(t) >= now).sort((a, b) => runTime(a) - runTime(b));
-  const past = out.filter((t) => runTime(t) < now).sort((a, b) => runTime(b) - runTime(a));
-  return [...upcoming, ...past];
+/** First index scheduled at or after `ms`, or -1 when everything is in the past. */
+function findNowIndex(list: TaskExecution[], ms: number): number {
+  return list.findIndex((t) => runTime(t) >= ms);
 }
 
 export default function ExecutionsPage() {
-  const router = useRouter();
-  const { cfg, timezone, ready } = useScheduler();
+  const { cfg, timezone, ready: settingsReady } = useScheduler();
+  const { get, getAll, push, open, close, ready: urlReady } = useUrlState();
+  const toast = useToast();
+  const ready = settingsReady && urlReady;
+  const isDesktop = useMediaQuery(DESKTOP_QUERY);
 
-  const [queueId, setQueueId] = useState('');
-  const [recurringId, setRecurringId] = useState('');
-  const [day, setDay] = useState('');
-  const [statuses, setStatuses] = useState<ExecutionStatus[]>([]);
-  const [search, setSearch] = useState('');
-  const [sortMode, setSortMode] = useState<SortMode>('upcoming');
-  const [tasks, setTasks] = useState<TaskExecution[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [page, setPage] = useState(0);
-  const [selected, setSelected] = useState<TaskExecution | null>(null);
-  const [cancelling, setCancelling] = useState<string | null>(null);
+  // ---- state that lives in the URL ----
+  const queueId = get('queue_id');
+  const recurringId = get('recurring_task_id');
+  const dayParam = get('day');
+  const day = isValidYmd(dayParam) ? dayParam : '';
+  const search = get('q');
+  const selectedId = get('selected');
+  const statusKey = getAll('status').join(',');
+  const statuses = useMemo(
+    () =>
+      (statusKey ? statusKey.split(',') : []).filter((s): s is ExecutionStatus =>
+        (ALL_EXECUTION_STATUSES as string[]).includes(s),
+      ),
+    [statusKey],
+  );
 
-  // Pick up filters from the URL (e.g. coming from the calendar / recurring pages).
+  // ---- local state: text being typed (committed to the URL on Enter / blur) and dialog state ----
+  const [queueInput, setQueueInput] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState('');
+  // Row the list should scroll to. Set for one render, then cleared (see below).
+  const [scrollIndex, setScrollIndex] = useState<number | undefined>(undefined);
+
+  useEffect(() => setQueueInput(queueId), [queueId]);
+  useEffect(() => setSearchInput(search), [search]);
   useEffect(() => {
-    if (!router.isReady) return;
-    const q = router.query;
-    if (typeof q.queue_id === 'string') setQueueId(q.queue_id);
-    if (typeof q.recurring_task_id === 'string') setRecurringId(q.recurring_task_id);
-    if (typeof q.day === 'string') setDay(q.day);
-  }, [router.isReady, router.query]);
+    setConfirming(false);
+    setCancelError('');
+  }, [selectedId]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await listTaskExecutions(cfg, { queue_id: queueId || undefined });
-      setTasks(data);
-      setPage(0);
-    } catch (e) {
-      setTasks([]);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [cfg, queueId]);
+  // ---- data: loaded asynchronously once the URL has been read ----
+  const fetchTasks = useCallback(
+    (signal: AbortSignal) =>
+      listTaskExecutions(cfg, { queue_id: queueId || undefined }, { signal }),
+    [cfg, queueId],
+  );
+  const { data: tasks, state, error, reload } = useAsyncData(fetchTasks, ready, EMPTY_TASKS);
 
-  useEffect(() => {
-    if (ready && router.isReady) load();
-  }, [ready, router.isReady, load]);
+  const initialLoading = state === 'loading' && tasks.length === 0;
+  const refreshing = state === 'loading' && tasks.length > 0;
 
-  const filtered = useMemo(() => {
+  // Filtered, then sorted by scheduled time ascending (oldest first).
+  const sorted = useMemo(() => {
     const s = search.trim().toLowerCase();
-    return tasks.filter((t) => {
-      if (statuses.length && !statuses.includes(t.status)) return false;
-      if (recurringId && t.recurring_task_id !== recurringId) return false;
-      if (day) {
-        // Compare the calendar day in the selected timezone.
-        const d = new Date(t.scheduled_run_at);
-        const local = new Intl.DateTimeFormat('en-CA', {
-          timeZone: timezone,
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-        }).format(d);
-        if (local !== day) return false;
-      }
-      if (s) {
-        const hay = `${t.id} ${t.queue_id} ${prettyJson(t.input)} ${prettyJson(
-          t.execution_state?.output,
-        )}`.toLowerCase();
-        if (!hay.includes(s)) return false;
-      }
-      return true;
-    });
+    return tasks
+      .filter((t) => {
+        if (statuses.length && !statuses.includes(t.status)) return false;
+        if (recurringId && t.recurring_task_id !== recurringId) return false;
+        if (day) {
+          // Compare the calendar day in the selected timezone.
+          const local = new Intl.DateTimeFormat('en-CA', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date(t.scheduled_run_at));
+          if (local !== day) return false;
+        }
+        if (s) {
+          const hay = `${t.id} ${t.queue_id} ${prettyJson(t.input)} ${prettyJson(
+            t.execution_state?.output,
+          )}`.toLowerCase();
+          if (!hay.includes(s)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => runTime(a) - runTime(b));
   }, [tasks, statuses, recurringId, day, search, timezone]);
-
-  const sorted = useMemo(() => sortTasks(filtered, sortMode), [filtered, sortMode]);
-
-  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const visible = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   const statusCounts = useMemo(() => {
     const m: Partial<Record<ExecutionStatus, number>> = {};
@@ -120,149 +131,96 @@ export default function ExecutionsPage() {
     return m;
   }, [tasks]);
 
-  const toggleStatus = (s: ExecutionStatus) => {
-    setStatuses((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
-    setPage(0);
+  const selected = useMemo(
+    () => (selectedId ? (tasks.find((t) => t.id === selectedId) ?? null) : null),
+    [tasks, selectedId],
+  );
+
+  // ---- "current time" positioning ----
+  // The first row scheduled from now on is marked; if everything is in the past, the newest row.
+  const anchorIndex = useMemo(() => findNowIndex(sorted, Date.now()), [sorted]);
+
+  const initialIndex = useMemo(() => {
+    if (sorted.length === 0) return 0;
+    // A specific past/future day is read from its start, not from "now".
+    if (day && day !== ymd(new Date())) return 0;
+    return anchorIndex >= 0 ? anchorIndex : sorted.length - 1;
+  }, [sorted.length, day, anchorIndex]);
+
+  const filterKey = [cfg.baseUrl, cfg.namespace, queueId, recurringId, day, search, statusKey].join(
+    '|',
+  );
+  const pendingSnap = useRef(true);
+  useEffect(() => {
+    pendingSnap.current = true;
+  }, [filterKey]);
+  useEffect(() => {
+    if (!pendingSnap.current || state !== 'ok' || sorted.length === 0) return;
+    pendingSnap.current = false;
+    setScrollIndex(initialIndex);
+  }, [state, sorted.length, initialIndex, filterKey]);
+
+  // scrollToIndex only needs to be set for the render that performs the scroll; clearing it
+  // afterwards stops the list from snapping back when the user scrolls or the data re-renders.
+  useEffect(() => {
+    if (scrollIndex === undefined) return;
+    const id = requestAnimationFrame(() => setScrollIndex(undefined));
+    return () => cancelAnimationFrame(id);
+  }, [scrollIndex]);
+
+  const jumpToNow = () => {
+    const i = findNowIndex(sorted, Date.now());
+    setScrollIndex(i >= 0 ? i : sorted.length - 1);
   };
 
+  // ---- URL-changing actions (each pushes a history entry) ----
+  const commitQueue = () => {
+    const v = queueInput.trim();
+    if (v !== queueId) push({ queue_id: v });
+  };
+  const commitSearch = () => {
+    const v = searchInput.trim();
+    if (v !== search) push({ q: v });
+  };
+  const toggleStatus = (s: ExecutionStatus) =>
+    push({ status: statuses.includes(s) ? statuses.filter((x) => x !== s) : [...statuses, s] });
+
   const cancel = async (t: TaskExecution) => {
-    if (!window.confirm(`Cancel execution ${t.id}?`)) return;
-    setCancelling(t.id);
+    setCancelling(true);
+    setCancelError('');
     try {
       await cancelTaskExecution(cfg, t);
-      setSelected(null);
-      await load();
+      toast.notify({
+        kind: 'success',
+        title: 'Execution cancelled',
+        message: `${t.queue_id} · ${fmtDateTime(t.scheduled_run_at, timezone)}`,
+      });
+      setConfirming(false);
+      reload();
     } catch (e) {
-      window.alert(`Cancel failed: ${e instanceof Error ? e.message : String(e)}`);
+      setCancelError(describeError(e));
     } finally {
-      setCancelling(null);
+      setCancelling(false);
     }
   };
 
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Task executions</h1>
-          <p className="text-xs text-slate-500">
-            {filtered.length} of {tasks.length} shown
-          </p>
-        </div>
-        <div className="grid w-full grid-cols-2 gap-3 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap sm:items-end">
-          <div className="col-span-2 sm:w-52">
-            <label className="label">Queue ID</label>
-            <input
-              className="input font-mono"
-              placeholder="sendInvoice()"
-              value={queueId}
-              onChange={(e) => setQueueId(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && load()}
-            />
-          </div>
-          <div className="sm:w-40">
-            <label className="label">Day ({timezone})</label>
-            <input
-              type="date"
-              className="input"
-              value={day}
-              onChange={(e) => {
-                setDay(e.target.value);
-                setPage(0);
-              }}
-            />
-          </div>
-          <div className="col-span-2 sm:w-56">
-            <label className="label">Search</label>
-            <input
-              className="input"
-              placeholder="id, input, output…"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(0);
-              }}
-            />
-          </div>
-          <div className="sm:w-48">
-            <label className="label">Sort</label>
-            <select
-              className="input"
-              value={sortMode}
-              onChange={(e) => {
-                setSortMode(e.target.value as SortMode);
-                setPage(0);
-              }}
-            >
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button className="btn" onClick={() => setDay(ymd(new Date()))}>
-            Today
-          </button>
-          <button className="btn btn-primary" onClick={load} disabled={loading}>
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
-        </div>
-      </div>
+  const hasFilters = statuses.length > 0 || !!day;
 
-      {recurringId && (
-        <div className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
-          Filtered by recurring task <code className="font-mono">{recurringId}</code>
-          <button className="ml-auto underline" onClick={() => setRecurringId('')}>
-            clear
-          </button>
-        </div>
-      )}
+  // ---- rows ----
+  const rowRenderer = ({ index, key, style }: ListRowProps) => {
+    const t = sorted[index];
+    // Marks where "now" falls in the (ascending) list.
+    const isNow = index === anchorIndex;
 
-      {/* Single scrollable row on phones, wrapping chips on larger screens */}
-      <div className="-mx-3 flex items-center gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
-        {ALL_EXECUTION_STATUSES.map((s) => {
-          const on = statuses.includes(s);
-          return (
-            <button
-              key={s}
-              onClick={() => toggleStatus(s)}
-              className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium transition sm:px-2.5 sm:py-1 ${
-                on
-                  ? 'border-indigo-600 bg-indigo-600 text-white'
-                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              {s} <span className="opacity-70">{statusCounts[s] || 0}</span>
-            </button>
-          );
-        })}
-        {(statuses.length > 0 || day) && (
+    if (!isDesktop) {
+      return (
+        <div key={key} style={style} className="pb-2">
           <button
-            className="shrink-0 whitespace-nowrap text-xs text-slate-500 underline"
-            onClick={() => {
-              setStatuses([]);
-              setDay('');
-            }}
-          >
-            clear filters
-          </button>
-        )}
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      {/* Phones: one tappable card per execution */}
-      <div className="space-y-2 md:hidden">
-        {visible.map((t) => (
-          <button
-            key={`${t.queue_id}/${t.id}`}
             type="button"
-            onClick={() => setSelected(t)}
-            className="card block w-full p-3 text-left active:bg-slate-50"
+            onClick={() => open('selected', t.id)}
+            className={`card block h-full w-full overflow-hidden p-3 text-left active:bg-slate-50 ${
+              isNow ? 'border-t-2 border-t-indigo-500' : ''
+            }`}
           >
             <div className="flex items-start justify-between gap-2">
               <div className="font-mono text-sm font-medium">
@@ -270,8 +228,8 @@ export default function ExecutionsPage() {
               </div>
               <StatusBadge status={t.status} />
             </div>
-            <div className="mt-1 break-all font-mono text-xs text-slate-600">{t.queue_id}</div>
-            <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-slate-500">
+            <div className="mt-1 truncate font-mono text-xs text-slate-600">{t.queue_id}</div>
+            <div className="mt-1 flex gap-x-3 truncate text-xs text-slate-500">
               <span>{t.execution_mode}</span>
               <span>
                 {t.assignment_status}
@@ -284,135 +242,356 @@ export default function ExecutionsPage() {
               </div>
             )}
           </button>
-        ))}
-        {visible.length === 0 && (
-          <div className="card px-3 py-10 text-center text-sm text-slate-500">
-            {loading ? 'Loading…' : 'No executions match the current filters.'}
-          </div>
-        )}
-      </div>
+        </div>
+      );
+    }
 
-      {/* Tablet / desktop: table */}
-      <div className="card hidden overflow-x-auto md:block">
-        <table className="min-w-full divide-y divide-slate-200">
-          <thead className="bg-slate-50">
-            <tr>
-              <th className="th">Scheduled</th>
-              <th className="th">Queue</th>
-              <th className="th">Status</th>
-              <th className="th">Assignment</th>
-              <th className="th">Mode</th>
-              <th className="th">Output</th>
-              <th className="th" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {visible.map((t) => (
-              <tr key={`${t.queue_id}/${t.id}`} className="hover:bg-slate-50">
-                <td className="td whitespace-nowrap font-mono text-xs">
-                  {fmtDateTime(t.scheduled_run_at, timezone)}
-                </td>
-                <td className="td font-mono text-xs">{t.queue_id}</td>
-                <td className="td">
-                  <StatusBadge status={t.status} />
-                </td>
-                <td className="td text-xs">
-                  {t.assignment_status}
-                  {t.assignment_state && (
-                    <span className="text-slate-500"> → node {t.assignment_state.assigned_to}</span>
-                  )}
-                </td>
-                <td className="td text-xs">{t.execution_mode}</td>
-                <td className="td max-w-[14rem] truncate font-mono text-xs text-slate-600">
-                  {t.execution_state ? prettyJson(t.execution_state.output) : '—'}
-                </td>
-                <td className="td whitespace-nowrap text-right">
-                  <button className="btn" onClick={() => setSelected(t)}>
-                    Details
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {visible.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-10 text-center text-sm text-slate-500">
-                  {loading ? 'Loading…' : 'No executions match the current filters.'}
-                </td>
-              </tr>
+    return (
+      <div
+        key={key}
+        style={style}
+        role="row"
+        className={`${TABLE_GRID} border-b border-slate-100 px-3 hover:bg-slate-50 ${
+          isNow ? 'border-t-2 border-t-indigo-500' : ''
+        }`}
+      >
+        <div className="whitespace-nowrap font-mono text-xs">
+          {fmtDateTime(t.scheduled_run_at, timezone)}
+        </div>
+        <div className="truncate font-mono text-xs">{t.queue_id}</div>
+        <div>
+          <StatusBadge status={t.status} />
+        </div>
+        <div className="text-xs leading-tight">
+          <div className="truncate">
+            {t.assignment_status}
+            {t.assignment_state && (
+              <span className="text-slate-500"> → node {t.assignment_state.assigned_to}</span>
             )}
-          </tbody>
-        </table>
+          </div>
+          <div className="truncate text-slate-400">{t.execution_mode}</div>
+        </div>
+        <div className="truncate font-mono text-xs text-slate-600">
+          {t.execution_state ? prettyJson(t.execution_state.output) : '—'}
+        </div>
+        <div className="text-right">
+          <button className="btn" onClick={() => open('selected', t.id)}>
+            Details
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Task executions</h1>
+          <div className="flex h-4 items-center text-xs text-slate-500">
+            {initialLoading ? (
+              <Skeleton className="h-3 w-28" />
+            ) : state === 'error' ? (
+              'Could not load'
+            ) : (
+              `${sorted.length} of ${tasks.length} shown`
+            )}
+          </div>
+        </div>
+        <div className="grid w-full grid-cols-2 gap-3 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap sm:items-end">
+          <div className="col-span-2 sm:w-52">
+            <label className="label" htmlFor="f-queue">
+              Queue ID
+            </label>
+            <input
+              id="f-queue"
+              className="input font-mono"
+              placeholder="sendInvoice()"
+              value={queueInput}
+              autoCapitalize="off"
+              autoCorrect="off"
+              onChange={(e) => setQueueInput(e.target.value)}
+              onBlur={commitQueue}
+              onKeyDown={(e) => e.key === 'Enter' && commitQueue()}
+            />
+          </div>
+          <div className="sm:w-40">
+            <label className="label" htmlFor="f-day">
+              Day ({timezone})
+            </label>
+            <input
+              id="f-day"
+              type="date"
+              className="input"
+              value={day}
+              onChange={(e) => push({ day: e.target.value })}
+            />
+          </div>
+          <div className="flex items-end">
+            <button className="btn w-full" onClick={() => push({ day: ymd(new Date()) })}>
+              Today
+            </button>
+          </div>
+          <div className="col-span-2 sm:w-56">
+            <label className="label" htmlFor="f-search">
+              Search
+            </label>
+            <input
+              id="f-search"
+              className="input"
+              placeholder="id, input, output…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onBlur={commitSearch}
+              onKeyDown={(e) => e.key === 'Enter' && commitSearch()}
+            />
+          </div>
+          <button
+            className="btn btn-primary col-span-2 min-w-[5.5rem] sm:col-span-1"
+            onClick={reload}
+            disabled={state === 'loading'}
+          >
+            {state === 'loading' ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
-      {pageCount > 1 && (
-        <div className="flex items-center justify-center gap-3 text-sm">
-          <button className="btn" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
-            ← Prev
-          </button>
-          <span className="text-slate-600">
-            Page {page + 1} / {pageCount}
+      {recurringId && (
+        <div className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
+          <span className="min-w-0 break-all">
+            Filtered by recurring task <code className="font-mono">{recurringId}</code>
           </span>
           <button
-            className="btn"
-            disabled={page >= pageCount - 1}
-            onClick={() => setPage((p) => p + 1)}
+            className="ml-auto shrink-0 underline"
+            onClick={() => push({ recurring_task_id: null })}
           >
-            Next →
+            clear
           </button>
         </div>
       )}
 
-      {selected && (
-        <Modal title="Task execution" wide onClose={() => setSelected(null)}>
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <StatusBadge status={selected.status} />
-              <code className="break-all font-mono text-xs text-slate-600">{selected.id}</code>
-              {CANCELLABLE.includes(selected.status) && (
-                <button
-                  className="btn btn-danger w-full sm:ml-auto sm:w-auto"
-                  disabled={cancelling === selected.id}
-                  onClick={() => cancel(selected)}
-                >
-                  {cancelling === selected.id ? 'Cancelling…' : 'Cancel execution'}
+      {/* Single scrollable row on phones, wrapping chips on larger screens */}
+      <div className="-mx-3 flex min-h-[2.25rem] items-center gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
+        {ALL_EXECUTION_STATUSES.map((s) => {
+          const on = statuses.includes(s);
+          return (
+            <button
+              key={s}
+              onClick={() => toggleStatus(s)}
+              aria-pressed={on}
+              className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium transition sm:px-2.5 sm:py-1 ${
+                on
+                  ? 'border-indigo-600 bg-indigo-600 text-white'
+                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              {s} <span className="opacity-70">{initialLoading ? '–' : statusCounts[s] || 0}</span>
+            </button>
+          );
+        })}
+        {hasFilters && (
+          <button
+            className="shrink-0 whitespace-nowrap text-xs text-slate-500 underline"
+            onClick={() => push({ status: null, day: null })}
+          >
+            clear filters
+          </button>
+        )}
+      </div>
+
+      {/*
+        The list area has one fixed height for every state (loading, error, empty, data), so
+        switching between them never moves the rest of the page.
+      */}
+      <div className="relative h-[70vh] min-h-[22rem] supports-[height:1dvh]:h-[70dvh]" aria-busy={state === 'loading'}>
+        {state === 'error' ? (
+          <div className="card h-full">
+            <ErrorPanel
+              minHeight="h-full"
+              title="Could not load task executions"
+              message={error}
+              onRetry={reload}
+            />
+          </div>
+        ) : !initialLoading && sorted.length === 0 ? (
+          <div className="card h-full">
+            <EmptyPanel
+              minHeight="h-full"
+              message={
+                tasks.length === 0
+                  ? 'No task executions found in this namespace.'
+                  : 'No executions match the current filters.'
+              }
+            >
+              {hasFilters && (
+                <button className="btn" onClick={() => push({ status: null, day: null })}>
+                  Clear filters
                 </button>
               )}
-            </div>
-            <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm sm:grid-cols-[9rem_minmax(0,1fr)]">
-              <dt className="text-slate-500">Queue</dt>
-              <dd className="font-mono">{selected.queue_id}</dd>
-              <dt className="text-slate-500">Scheduled run</dt>
-              <dd>{fmtDateTime(selected.scheduled_run_at, timezone)}</dd>
-              <dt className="text-slate-500">Actual run</dt>
-              <dd>{fmtDateTime(selected.execution_state?.actual_run_at, timezone)}</dd>
-              <dt className="text-slate-500">Completed</dt>
-              <dd>{fmtDateTime(selected.execution_state?.completed_at, timezone)}</dd>
-              <dt className="text-slate-500">Published</dt>
-              <dd>{fmtDateTime(selected.published_at, timezone)}</dd>
-              <dt className="text-slate-500">Mode</dt>
-              <dd>{selected.execution_mode}</dd>
-              <dt className="text-slate-500">Recurring task</dt>
-              <dd className="break-all font-mono text-xs">{selected.recurring_task_id ?? '—'}</dd>
-              <dt className="text-slate-500">Assignment</dt>
-              <dd>
-                {selected.assignment_status}
-                {selected.assignment_state &&
-                  ` — node ${selected.assignment_state.assigned_to} (by ${selected.assignment_state.assigned_by}, ×${selected.assignment_state.assignment_count})`}
-              </dd>
-            </dl>
-            <div>
-              <div className="label">Input</div>
-              <pre className="max-h-48 overflow-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-100">
-                {prettyJson(selected.input)}
-              </pre>
-            </div>
-            <div>
-              <div className="label">Output</div>
-              <pre className="max-h-48 overflow-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-100">
-                {selected.execution_state ? prettyJson(selected.execution_state.output) : '—'}
-              </pre>
+            </EmptyPanel>
+          </div>
+        ) : (
+          <div
+            className={`flex h-full flex-col overflow-hidden md:rounded-lg md:border md:border-slate-200 md:bg-white md:shadow-sm ${
+              refreshing ? 'opacity-60 transition-opacity' : 'transition-opacity'
+            }`}
+          >
+            {isDesktop && (
+              <div
+                role="row"
+                className={`${TABLE_GRID} shrink-0 border-b border-slate-200 bg-slate-50 py-2 pl-3 pr-7 text-xs font-semibold uppercase tracking-wide text-slate-500`}
+              >
+                <div>Scheduled</div>
+                <div>Queue</div>
+                <div>Status</div>
+                <div>Assignment</div>
+                <div>Output</div>
+                <div />
+              </div>
+            )}
+            <div className="min-h-0 flex-1">
+              {initialLoading ? (
+                <div aria-hidden>
+                  {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+                    <div
+                      key={i}
+                      style={{ height: isDesktop ? TABLE_ROW_HEIGHT : CARD_ROW_HEIGHT }}
+                      className={isDesktop ? 'px-3 py-3' : 'pb-2'}
+                    >
+                      <Skeleton className="h-full w-full" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <AutoSizer>
+                  {({ height, width }: { height: number; width: number }) => (
+                    <List
+                      // Remount when switching between the card and table layouts (row height differs).
+                      key={isDesktop ? 'table' : 'cards'}
+                      width={width}
+                      height={height}
+                      rowCount={sorted.length}
+                      rowHeight={isDesktop ? TABLE_ROW_HEIGHT : CARD_ROW_HEIGHT}
+                      rowRenderer={rowRenderer}
+                      overscanRowCount={6}
+                      scrollToIndex={scrollIndex}
+                      scrollToAlignment="center"
+                    />
+                  )}
+                </AutoSizer>
+              )}
             </div>
           </div>
+        )}
+
+        {!initialLoading && state !== 'error' && sorted.length > 0 && (
+          <button
+            className="btn btn-primary absolute bottom-3 right-4 shadow-lg"
+            onClick={jumpToNow}
+            aria-label="Scroll to the current time"
+          >
+            ↧ Now
+          </button>
+        )}
+      </div>
+
+      {selectedId && (
+        <Modal title="Task execution" wide onClose={() => close('selected')}>
+          {initialLoading ? (
+            <div className="space-y-3" aria-busy="true">
+              <Skeleton className="h-6 w-1/2" />
+              <Skeleton className="h-40" />
+              <Skeleton className="h-24" />
+            </div>
+          ) : state === 'error' ? (
+            <ErrorPanel
+              minHeight="min-h-[12rem]"
+              title="Could not load this execution"
+              message={error}
+              onRetry={reload}
+            />
+          ) : !selected ? (
+            <EmptyPanel minHeight="min-h-[12rem]" message="This execution was not found.">
+              <p className="max-w-sm text-xs">
+                It may belong to a different queue or namespace than the one currently selected, or
+                it may no longer exist.
+              </p>
+            </EmptyPanel>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <StatusBadge status={selected.status} />
+                <code className="break-all font-mono text-xs text-slate-600">{selected.id}</code>
+                {CANCELLABLE.includes(selected.status) && (
+                  <div className="w-full sm:ml-auto sm:w-auto">
+                    {confirming ? (
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <span className="text-sm text-slate-600">Cancel this execution?</span>
+                        <div className="flex gap-2">
+                          <button
+                            className="btn flex-1 sm:flex-none"
+                            disabled={cancelling}
+                            onClick={() => setConfirming(false)}
+                          >
+                            Keep
+                          </button>
+                          <button
+                            className="btn btn-danger flex-1 sm:flex-none"
+                            disabled={cancelling}
+                            onClick={() => cancel(selected)}
+                          >
+                            {cancelling ? 'Cancelling…' : 'Yes, cancel'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn btn-danger w-full sm:w-auto"
+                        onClick={() => setConfirming(true)}
+                      >
+                        Cancel execution
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {cancelError && <InlineError message={`Could not cancel the execution: ${cancelError}`} />}
+              <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm sm:grid-cols-[9rem_minmax(0,1fr)]">
+                <dt className="text-slate-500">Queue</dt>
+                <dd className="break-all font-mono">{selected.queue_id}</dd>
+                <dt className="text-slate-500">Scheduled run</dt>
+                <dd>{fmtDateTime(selected.scheduled_run_at, timezone)}</dd>
+                <dt className="text-slate-500">Actual run</dt>
+                <dd>{fmtDateTime(selected.execution_state?.actual_run_at, timezone)}</dd>
+                <dt className="text-slate-500">Completed</dt>
+                <dd>{fmtDateTime(selected.execution_state?.completed_at, timezone)}</dd>
+                <dt className="text-slate-500">Published</dt>
+                <dd>{fmtDateTime(selected.published_at, timezone)}</dd>
+                <dt className="text-slate-500">Mode</dt>
+                <dd>{selected.execution_mode}</dd>
+                <dt className="text-slate-500">Recurring task</dt>
+                <dd className="break-all font-mono text-xs">{selected.recurring_task_id ?? '—'}</dd>
+                <dt className="text-slate-500">Assignment</dt>
+                <dd>
+                  {selected.assignment_status}
+                  {selected.assignment_state &&
+                    ` — node ${selected.assignment_state.assigned_to} (by ${selected.assignment_state.assigned_by}, ×${selected.assignment_state.assignment_count})`}
+                </dd>
+              </dl>
+              <div>
+                <div className="label">Input</div>
+                <pre className="max-h-48 overflow-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-100">
+                  {prettyJson(selected.input)}
+                </pre>
+              </div>
+              <div>
+                <div className="label">Output</div>
+                <pre className="max-h-48 overflow-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-100">
+                  {selected.execution_state ? prettyJson(selected.execution_state.output) : '—'}
+                </pre>
+              </div>
+            </div>
+          )}
         </Modal>
       )}
     </div>
