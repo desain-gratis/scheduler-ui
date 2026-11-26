@@ -143,8 +143,6 @@ export default function CalendarPage() {
     return Array.from({ length: 24 }, (_, h) => ({ hour: h, counts: m.get(h) ?? {} }));
   }, [hourly]);
 
-  const maxHour = Math.max(1, ...hourRows.map((r) => sum(r.counts)));
-
   const executionsHref = useMemo(() => {
     const p = new URLSearchParams();
     if (queueFilter) p.set('queue_id', queueFilter);
@@ -333,7 +331,9 @@ export default function CalendarPage() {
           <h2 className="text-base font-semibold">{selectedDay}</h2>
           <span className="text-xs text-slate-500">{timezone}</span>
         </div>
-        <p className="mb-3 text-xs text-slate-500">Hourly breakdown</p>
+        <p className="mb-3 text-xs text-slate-500">
+          Hourly breakdown — each bar shows the status mix of that hour; the number is its total.
+        </p>
 
         {/* 24 fixed-height rows are always rendered; only their fill changes. */}
         <div className="relative">
@@ -355,8 +355,9 @@ export default function CalendarPage() {
                         <div
                           key={s}
                           className={STATUS_STYLES[s].dot}
-                          style={{ width: `${((counts[s] || 0) / maxHour) * 100}%` }}
-                          title={`${s}: ${counts[s]}`}
+                          // Every hour's bar is full width, split by each status's share of that hour.
+                          style={{ flexGrow: counts[s] || 0, flexBasis: 0 }}
+                          title={`${s}: ${counts[s]} (${Math.round(((counts[s] || 0) / total) * 100)}%)`}
                         />
                       ))}
                   </div>
