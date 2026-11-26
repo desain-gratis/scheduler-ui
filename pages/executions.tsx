@@ -34,8 +34,9 @@ const TABLE_ROW_HEIGHT = 52; // md and up
 const SKELETON_ROWS = 8;
 // Same breakpoint as Tailwind's `md:`.
 const DESKTOP_QUERY = '(min-width: 768px)';
+// The Output column only appears from `lg`; below that the columns fit a tablet without clipping.
 const TABLE_GRID =
-  'grid grid-cols-[10.5rem_minmax(7rem,1fr)_8.5rem_8rem_minmax(5rem,1fr)_5.5rem] items-center gap-x-3';
+  'grid grid-cols-[12.5rem_minmax(6rem,1fr)_8.5rem_8rem_5.5rem] items-center gap-x-3 lg:grid-cols-[12.5rem_minmax(7rem,1fr)_8.5rem_8rem_minmax(6rem,1fr)_5.5rem]';
 
 function runTime(t: TaskExecution): number {
   const ms = new Date(t.scheduled_run_at).getTime();
@@ -53,6 +54,8 @@ export default function ExecutionsPage() {
   const toast = useToast();
   const ready = settingsReady && urlReady;
   const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  // Dates here always show the short day of week (default locale), e.g. to spot weekends.
+  const fmt = (iso?: string | null) => fmtDateTime(iso, timezone, { weekday: true });
 
   // ---- state that lives in the URL ----
   const queueId = get('queue_id');
@@ -78,6 +81,9 @@ export default function ExecutionsPage() {
   const [cancelError, setCancelError] = useState('');
   // Row the list should scroll to. Set for one render, then cleared (see below).
   const [scrollIndex, setScrollIndex] = useState<number | undefined>(undefined);
+  // Row briefly highlighted after scrolling to "now" (cleared on its own, see below).
+  const [flash, setFlash] = useState<{ index: number; id: number } | null>(null);
+  const flashSeq = useRef(0);
 
   useEffect(() => setQueueInput(queueId), [queueId]);
   useEffect(() => setSearchInput(search), [search]);
@@ -158,7 +164,10 @@ export default function ExecutionsPage() {
     if (!pendingSnap.current || state !== 'ok' || sorted.length === 0) return;
     pendingSnap.current = false;
     setScrollIndex(initialIndex);
-  }, [state, sorted.length, initialIndex, filterKey]);
+    if (anchorIndex >= 0 && initialIndex === anchorIndex) {
+      setFlash({ index: anchorIndex, id: ++flashSeq.current });
+    }
+  }, [state, sorted.length, initialIndex, anchorIndex, filterKey]);
 
   // scrollToIndex only needs to be set for the render that performs the scroll; clearing it
   // afterwards stops the list from snapping back when the user scrolls or the data re-renders.
@@ -168,9 +177,17 @@ export default function ExecutionsPage() {
     return () => cancelAnimationFrame(id);
   }, [scrollIndex]);
 
+  // The "now" marker is not permanent: it flashes briefly, then goes away.
+  useEffect(() => {
+    if (!flash) return;
+    const id = setTimeout(() => setFlash(null), 1800);
+    return () => clearTimeout(id);
+  }, [flash]);
+
   const jumpToNow = () => {
     const i = findNowIndex(sorted, Date.now());
     setScrollIndex(i >= 0 ? i : sorted.length - 1);
+    if (i >= 0) setFlash({ index: i, id: ++flashSeq.current });
   };
 
   // ---- URL-changing actions (each pushes a history entry) ----
@@ -193,7 +210,7 @@ export default function ExecutionsPage() {
       toast.notify({
         kind: 'success',
         title: 'Execution cancelled',
-        message: `${t.queue_id} · ${fmtDateTime(t.scheduled_run_at, timezone)}`,
+        message: `${t.queue_id} · ${fmt(t.scheduled_run_at)}`,
       });
       setConfirming(false);
       reload();
@@ -209,22 +226,23 @@ export default function ExecutionsPage() {
   // ---- rows ----
   const rowRenderer = ({ index, key, style }: ListRowProps) => {
     const t = sorted[index];
-    // Marks where "now" falls in the (ascending) list.
-    const isNow = index === anchorIndex;
+    // Set only while the row at "now" is being highlighted; a new id restarts the animation.
+    const flashId = flash && flash.index === index ? flash.id : null;
+    const rowKey = flashId ? `${key}:${flashId}` : key;
 
     if (!isDesktop) {
       return (
-        <div key={key} style={style} className="pb-2">
+        <div key={rowKey} style={style} className="pb-2">
           <button
             type="button"
             onClick={() => open('selected', t.id)}
             className={`card block h-full w-full overflow-hidden p-3 text-left active:bg-slate-50 ${
-              isNow ? 'border-t-2 border-t-indigo-500' : ''
+              flashId ? 'now-flash' : ''
             }`}
           >
             <div className="flex items-start justify-between gap-2">
-              <div className="font-mono text-sm font-medium">
-                {fmtDateTime(t.scheduled_run_at, timezone)}
+              <div className="font-mono text-xs font-medium sm:text-sm">
+                {fmt(t.scheduled_run_at)}
               </div>
               <StatusBadge status={t.status} />
             </div>
@@ -248,15 +266,15 @@ export default function ExecutionsPage() {
 
     return (
       <div
-        key={key}
+        key={rowKey}
         style={style}
         role="row"
         className={`${TABLE_GRID} border-b border-slate-100 px-3 hover:bg-slate-50 ${
-          isNow ? 'border-t-2 border-t-indigo-500' : ''
+          flashId ? 'now-flash' : ''
         }`}
       >
         <div className="whitespace-nowrap font-mono text-xs">
-          {fmtDateTime(t.scheduled_run_at, timezone)}
+          {fmt(t.scheduled_run_at)}
         </div>
         <div className="truncate font-mono text-xs">{t.queue_id}</div>
         <div>
@@ -271,7 +289,7 @@ export default function ExecutionsPage() {
           </div>
           <div className="truncate text-slate-400">{t.execution_mode}</div>
         </div>
-        <div className="truncate font-mono text-xs text-slate-600">
+        <div className="hidden truncate font-mono text-xs text-slate-600 lg:block">
           {t.execution_state ? prettyJson(t.execution_state.output) : '—'}
         </div>
         <div className="text-right">
@@ -445,7 +463,7 @@ export default function ExecutionsPage() {
                 <div>Queue</div>
                 <div>Status</div>
                 <div>Assignment</div>
-                <div>Output</div>
+                <div className="hidden lg:block">Output</div>
                 <div />
               </div>
             )}
@@ -560,13 +578,13 @@ export default function ExecutionsPage() {
                 <dt className="text-slate-500">Queue</dt>
                 <dd className="break-all font-mono">{selected.queue_id}</dd>
                 <dt className="text-slate-500">Scheduled run</dt>
-                <dd>{fmtDateTime(selected.scheduled_run_at, timezone)}</dd>
+                <dd>{fmt(selected.scheduled_run_at)}</dd>
                 <dt className="text-slate-500">Actual run</dt>
-                <dd>{fmtDateTime(selected.execution_state?.actual_run_at, timezone)}</dd>
+                <dd>{fmt(selected.execution_state?.actual_run_at)}</dd>
                 <dt className="text-slate-500">Completed</dt>
-                <dd>{fmtDateTime(selected.execution_state?.completed_at, timezone)}</dd>
+                <dd>{fmt(selected.execution_state?.completed_at)}</dd>
                 <dt className="text-slate-500">Published</dt>
-                <dd>{fmtDateTime(selected.published_at, timezone)}</dd>
+                <dd>{fmt(selected.published_at)}</dd>
                 <dt className="text-slate-500">Mode</dt>
                 <dd>{selected.execution_mode}</dd>
                 <dt className="text-slate-500">Recurring task</dt>

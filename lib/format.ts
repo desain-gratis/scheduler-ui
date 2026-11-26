@@ -11,11 +11,20 @@ export const STATUS_STYLES: Record<ExecutionStatus, { badge: string; dot: string
   CANCELLED: { badge: 'bg-slate-200 text-slate-700 ring-slate-300', dot: 'bg-slate-400' },
 };
 
-export function fmtDateTime(iso?: string | null, timeZone?: string): string {
+/**
+ * Date and time in the viewer's default locale. `weekday: true` adds the short day of week
+ * (e.g. "Sun"), so weekends and weekdays are easy to tell apart.
+ */
+export function fmtDateTime(
+  iso?: string | null,
+  timeZone?: string,
+  opts: { weekday?: boolean } = {},
+): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, {
+    ...(opts.weekday ? { weekday: 'short' as const } : {}),
     year: 'numeric',
     month: 'short',
     day: '2-digit',
