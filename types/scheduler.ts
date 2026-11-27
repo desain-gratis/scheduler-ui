@@ -51,6 +51,8 @@ export interface TaskExecution {
   execution_mode: ExecutionMode;
   recurring_task_id: string | null;
   published_at: string;
+  /** Where the task's log lives (host of the node that ran it). Absent on older tasks. */
+  log_url?: string;
   url?: string;
 }
 
@@ -105,4 +107,19 @@ export interface AggregationParams {
   assigned_node?: number[];
   queue_id?: string;
   id?: string;
+}
+
+/** One line of the task log stream (newline-delimited JSON). Only the first five are guaranteed. */
+export interface LogEntry {
+  /** Client-side sequence number, used as the React key. */
+  seq: number;
+  time: string;
+  level: string;
+  msg: string;
+  task_id?: string;
+  queue_id?: string;
+  /** Everything else the server sent (executor_id, …). */
+  extra?: Record<string, unknown>;
+  /** Set when the line was not valid JSON; `msg` then holds the raw text. */
+  unparsed?: boolean;
 }

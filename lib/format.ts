@@ -36,6 +36,21 @@ export function fmtDateTime(
   });
 }
 
+/** Time of day with milliseconds in the given timezone, e.g. "03:00:24.604" (for log lines). */
+export function fmtLogTime(iso?: string | null, timeZone?: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3,
+    hour12: false,
+    timeZone,
+  });
+}
+
 export function pad(n: number): string {
   return String(n).padStart(2, '0');
 }

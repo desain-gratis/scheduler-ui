@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AutoSizer, List } from 'react-virtualized';
 import type { ListRowProps } from 'react-virtualized';
@@ -574,6 +575,18 @@ export default function ExecutionsPage() {
                 )}
               </div>
               {cancelError && <InlineError message={`Could not cancel the execution: ${cancelError}`} />}
+              {selected.log_url && (
+                <Link
+                  className="btn w-full justify-center sm:w-auto"
+                  href={{
+                    pathname: '/log',
+                    query: { queue_id: selected.queue_id, task_id: selected.id },
+                  }}
+                >
+                  View log →
+                </Link>
+              )}
+
               <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm sm:grid-cols-[9rem_minmax(0,1fr)]">
                 <dt className="text-slate-500">Queue</dt>
                 <dd className="break-all font-mono">{selected.queue_id}</dd>
