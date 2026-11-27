@@ -25,7 +25,7 @@ import { ALL_EXECUTION_STATUSES, ExecutionStatus, TaskExecution } from '@/types/
  * positioned at the current time.
  */
 
-const CANCELLABLE: ExecutionStatus[] = ['PENDING'];
+const CANCELLABLE: ExecutionStatus[] = ['PENDING', 'IN_PROGRESS'];
 const EMPTY_TASKS: TaskExecution[] = [];
 
 // Row geometry (px). Rows have a fixed height, which is what lets the list virtualize cheaply
@@ -545,7 +545,11 @@ export default function ExecutionsPage() {
                   <div className="w-full sm:ml-auto sm:w-auto">
                     {confirming ? (
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                        <span className="text-sm text-slate-600">Cancel this execution?</span>
+                        <span className="text-sm text-slate-600">
+                          {selected.status === 'IN_PROGRESS'
+                            ? 'This execution is running now. Cancel it?'
+                            : 'Cancel this execution?'}
+                        </span>
                         <div className="flex gap-2">
                           <button
                             className="btn flex-1 sm:flex-none"
